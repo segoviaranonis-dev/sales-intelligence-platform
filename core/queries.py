@@ -26,7 +26,13 @@ class QueryCenter:
         if not QueryCenter.check_column_exists(table, target_column):
             return []
 
-        query = f"SELECT DISTINCT {target_column} FROM {table} WHERE {target_column} IS NOT NULL ORDER BY {target_column}"
+        # Aseguramos que solo traiga valores que no sean nulos ni vacíos
+        query = f"""
+            SELECT DISTINCT {target_column}
+            FROM {table}
+            WHERE {target_column} IS NOT NULL AND CAST({target_column} AS TEXT) != ''
+            ORDER BY {target_column}
+        """
         try:
             df = get_dataframe(query)
             return df[target_column].astype(str).tolist() if not df.empty else []
@@ -39,7 +45,6 @@ class QueryCenter:
         conditions = []
         params = {}
 
-        # Mapeo con sanitización de tipos
         mapping = {
             'tipo': 'UPPER(t.descp_tipo)',
             'marca': 'm.descp_marca',
@@ -70,11 +75,11 @@ class QueryCenter:
 
         where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
 
-        # QUERY ACTUALIZADA: Se agrega tabla Vendedor y se selecciona descp_vendedor
+        # CAMBIO SEGURO: Usamos COALESCE en monto para que nunca llegue un None/Null a Python
         query = f"""
             SELECT
                 v.fecha,
-                CAST(v.monto AS NUMERIC) as monto,
+                COALESCE(CAST(v.monto AS NUMERIC), 0) as monto,
                 v.id_categoria,
                 t.descp_tipo as tipo,
                 m.descp_marca as marca,
@@ -92,4 +97,11 @@ class QueryCenter:
             {where_sql}
             ORDER BY v.fecha ASC
         """
-        return get_dataframe(query, params)
+        df = get_dataframe(query, params)
+
+        # Limpieza final antes de salir a la UI para evitar el error de "NoneType"
+        if df is not None and not df.empty:
+            df['monto'] = df['monto'].fillna(0)
+            df['fecha'] = df['fecha'].fillna(method='ffill') # Seguridad extra para fechas
+
+        return df

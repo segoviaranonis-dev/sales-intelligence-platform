@@ -38,6 +38,16 @@ def render_sales_report_interface():
 
     with st.sidebar:
         st.title("🛡️ Filtros de Control")
+
+        st.subheader("🎯 Incremento Objetivo (%)")
+        objetivo_pct = st.select_slider(
+            "Sobre Año Base (2025):",
+            options=list(range(0, 105, 5)),
+            value=20,
+            help="Define el aumento porcentual que se aplicará a las ventas del 2025."
+        )
+        st.divider()
+
         tipo_opciones = QueryCenter.get_filter_options("descp_tipo", "tipo")
         index_calzados = tipo_opciones.index("CALZADOS") if "CALZADOS" in tipo_opciones else 0
         tipo = st.selectbox("Tipo:", options=tipo_opciones, index=index_calzados)
@@ -47,6 +57,32 @@ def render_sales_report_interface():
 
         st.divider()
 
+        st.subheader("📅 Periodo Comparativo")
+        periodo_tipo = st.radio("Preselección:", ["1er Semestre", "2do Semestre", "Personalizado"], horizontal=True)
+
+        meses_nombres = [
+            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ]
+
+        # Lógica de preselección de meses corregida
+        if periodo_tipo == "1er Semestre":
+            default_meses = meses_nombres[0:6]
+        elif periodo_tipo == "2do Semestre":
+            default_meses = meses_nombres[6:12]
+        else:
+            # Si es personalizado, mantenemos lo que el usuario elija o el semestre 1 por defecto
+            default_meses = meses_nombres[0:6]
+
+        meses_sel = st.multiselect("Seleccionar Meses:", options=meses_nombres, default=default_meses)
+
+        col_f1, col_f2 = st.columns(2)
+        with col_f1: st.info("**Base:** 2025")
+        with col_f2: st.success("**Actual:** 2026")
+
+        st.divider()
+
+        # --- FILTROS DE CARTERA ---
         query_marcas_dept = f"""
             SELECT DISTINCT m.descp_marca
             FROM registro_ventas_general v
@@ -71,22 +107,15 @@ def render_sales_report_interface():
         cliente = cliente if cliente else "Todos"
         id_cliente = id_cliente if id_cliente else "Todos"
 
-        st.divider()
-        st.subheader("📅 Periodo Comparativo")
-        fecha_inicio = st.date_input("Desde:", datetime(2025, 1, 1))
-        fecha_fin = st.date_input("Hasta:", datetime(2025, 6, 30))
-        anio_base = st.select_slider("Año Objetivo:", options=[2024, 2025, 2026], value=2025)
-
-        generar = st.button("🚀 GENERAR ANÁLISIS", type="primary", width='stretch')
+        generar = st.button("🚀 GENERAR ANÁLISIS", type="primary", use_container_width=True)
 
     filtros_activos = {
         "tipo": tipo, "categoria": id_categoria, "marca": marca,
         "cliente": cliente, "cadena": cadena, "id_cliente": id_cliente,
-        "start_date": fecha_inicio, "end_date": fecha_fin
+        "start_date": datetime(2025, 1, 1), "end_date": datetime(2026, 12, 31)
     }
 
-    if 'first_run' not in st.session_state:
-        st.session_state.first_run = True
+    if 'df_ventas' not in st.session_state:
         st.session_state.df_ventas = QueryCenter.get_main_sales_query(filtros_activos)
 
     if generar:
@@ -95,10 +124,12 @@ def render_sales_report_interface():
     if 'df_ventas' in st.session_state and not st.session_state.df_ventas.empty:
         df = st.session_state.df_ventas
 
-        tabla_mes = SalesLogic.process_comparison_matrix(df)
-        dict_cartera = SalesLogic.process_customer_opportunity(df)
-        tabla_mar_gen, tabla_mar_det = SalesLogic.process_brand_drilldown(df)
-        tabla_ven_gen, tabla_ven_det = SalesLogic.process_seller_drilldown(df)
+        # --- CRÍTICO: PASAR objetivo_pct Y meses_sel A LA LÓGICA ---
+        # Ahora la lógica sanitizará el dataframe antes de procesar cada tabla
+        tabla_mes = SalesLogic.process_comparison_matrix(df, objetivo_pct, meses_sel)
+        dict_cartera = SalesLogic.process_customer_opportunity(df, objetivo_pct, meses_sel)
+        tabla_mar_gen, tabla_mar_det = SalesLogic.process_brand_drilldown(df, objetivo_pct, meses_sel)
+        tabla_ven_gen, tabla_ven_det = SalesLogic.process_seller_drilldown(df, objetivo_pct, meses_sel)
 
         tab_gen, tab_cli, tab_mar, tab_ven = st.tabs([
             "📊 Resumen General", "👥 Análisis Clientes",
@@ -118,9 +149,10 @@ def render_sales_report_interface():
                     "Vendedores: Resumen": tabla_ven_gen
                 })
                 st.download_button("📄 Informe Completo (PDF)", data=full_report,
-                                  file_name="Reporte_Ventas_360.pdf", mime="application/pdf", width='stretch')
+                                  file_name="Reporte_Ventas_360.pdf", mime="application/pdf")
 
-            kpis = SalesLogic.get_kpis(df, anio_base)
+            # KPIs sincronizados con los filtros
+            kpis = SalesLogic.get_kpis(df, objetivo_pct, meses_sel)
             m1, m2, m3, m4, m5 = st.columns(5)
             with m1: card_style("Clientes 2025", f"{kpis['clientes_25']}")
             with m2: card_style("Clientes 2026", f"{kpis['clientes_26']}")
@@ -143,10 +175,10 @@ def render_sales_report_interface():
                 with st.expander(label, expanded=(key=='crecimiento')):
                     df_seg = dict_cartera[key]
                     c1, c2 = st.columns([3, 1])
-                    with c1: getattr(st, func)(f"Registros detectados: {len(df_seg)-1}")
+                    with c1: getattr(st, func)(f"Registros detectados: {max(0, len(df_seg)-1)}")
                     with c2:
                         pdf = ExportManager.generate_single_table_pdf(df_seg, label)
-                        st.download_button(f"📥 PDF {key.title()}", data=pdf, file_name=f"{key}.pdf", key=f"btn_{key}", width='stretch')
+                        st.download_button(f"📥 PDF {key.title()}", data=pdf, file_name=f"{key}.pdf", key=f"btn_{key}")
                     st.dataframe(df_seg.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1), width='stretch', hide_index=True)
 
         with tab_mar:
@@ -160,7 +192,7 @@ def render_sales_report_interface():
                 with c1: st.info(f"Desglose detallado de marcas con sus respectivos clientes.")
                 with c2:
                     pdf_mar_det = ExportManager.generate_single_table_pdf(tabla_mar_det, "DETALLE DE MARCAS POR CLIENTE")
-                    st.download_button("📥 Descargar Detalle (PDF)", data=pdf_mar_det, file_name="Detalle_Marcas.pdf", key="btn_pdf_mar_det", width='stretch')
+                    st.download_button("📥 Descargar Detalle (PDF)", data=pdf_mar_det, file_name="Detalle_Marcas.pdf", key="btn_pdf_mar_det")
 
                 df_mar_det_clean = clean_duplicate_labels(tabla_mar_det, ['Marca'])
                 st.dataframe(df_mar_det_clean.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
@@ -168,14 +200,8 @@ def render_sales_report_interface():
 
         with tab_ven:
             st.subheader("💼 Gestión de Vendedores")
-
-            # --- SECCIÓN ÚNICA DE EXPORTACIÓN EN LOTE (ZIP) ---
             st.markdown("### 📲 Generar Reportes para WhatsApp")
-            st.info("Esta acción generará un archivo PDF individual por cada vendedor y los empaquetará en un solo archivo ZIP.")
-
-            # Llamada al nuevo método de exportación en lote
             zip_data = ExportManager.generate_batch_zip_reports(tabla_ven_det)
-
             st.download_button(
                 label="📥 DESCARGAR TODOS LOS PDF (ZIP)",
                 data=zip_data,
@@ -185,13 +211,10 @@ def render_sales_report_interface():
                 use_container_width=True
             )
             st.divider()
-
             with st.expander("📊 RANKING DE VENDEDORES", expanded=True):
                 st.dataframe(tabla_ven_gen.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
                                width='stretch', hide_index=True)
-
             with st.expander("🔍 DETALLE: VENDEDOR > MARCA > CLIENTE", expanded=True):
-                # Se aplica limpieza y el estilo de subtotales
                 df_ven_det_clean = clean_duplicate_labels(tabla_ven_det, ['Vendedor', 'Marca'])
                 st.dataframe(df_ven_det_clean.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
                                width='stretch', hide_index=True)
