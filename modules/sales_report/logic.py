@@ -239,3 +239,4 @@ class SalesLogic:
         col_target = f"Objetivo 2025 (+{objetivo_pct}%)"
         return tabla_gen[['Vendedor', col_target, 'Venta 2026', 'Variación']], \
                 tabla_det[['Vendedor', 'Marca', 'Cliente', col_target, 'Venta 2026', 'Variación']]
+# forced update: 02/02/2026 08:59:11

@@ -221,3 +221,4 @@ def render_sales_report_interface():
 
     elif 'df_ventas' in st.session_state and st.session_state.df_ventas.empty:
         st.warning("⚠️ No hay datos para los filtros seleccionados.")
+# forced update: 02/02/2026 08:59:11
