@@ -4,3 +4,4 @@ numpy
 reportlab
 psycopg2-binary
 sqlalchemy
+openpyxl
