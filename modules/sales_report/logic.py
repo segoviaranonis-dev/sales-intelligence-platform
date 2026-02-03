@@ -1,11 +1,12 @@
 # Ubicación: C:\Users\hecto\Documents\Prg_locales\I_R_G\modules\sales_report\logic.py
 import pandas as pd
 import numpy as np
+import sys
 
 class SalesLogic:
-    """Motor de Inteligencia de Cartera y Performance - Análisis Jerárquico Drill-Down."""
+    """Motor de Inteligencia v6.7: Blindaje de Identificadores y Consistencia de Datos 2026."""
 
-    CATEGORIA_MAP = {"Stock": 1, "Pre-Venta": 2, "Programado": 3}
+    CATEGORIA_MAP = {"Stock": "1", "Pre-Venta": "2", "Programado": "3"}
 
     MESES_ES = {
         1: "01 - Enero", 2: "02 - Febrero", 3: "03 - Marzo", 4: "04 - Abril",
@@ -13,230 +14,202 @@ class SalesLogic:
         9: "09 - Septiembre", 10: "10 - Octubre", 11: "11 - Noviembre", 12: "12 - Diciembre"
     }
 
+    MESES_ABREVIADOS = {
+        1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"
+    }
+
+    @staticmethod
+    def _add_total_data(df, label_col):
+        """Calcula filas de total general respetando el formato de puntos y comas."""
+        if df is None or df.empty: return df
+        df_res = df.copy()
+
+        # Columnas que NO deben sumarse
+        exclude = [label_col, 'Variación', 'Var %', 'Mes', 'Vendedor', 'Cliente',
+                   'Marca', 'Identificador', 'Cadena', '% Var Cant', '% Var Mont']
+        num_cols = [c for c in df.columns if c in df_res.columns and c not in exclude]
+
+        total_row = {col: "" for col in df.columns}
+        total_row[label_col] = "== TOTAL GENERAL =="
+
+        sums = []
+        for col in num_cols:
+            try:
+                # Limpieza de formato Gs. (puntos a vacio, coma a punto)
+                series_clean = df[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+                val = pd.to_numeric(series_clean, errors='coerce').fillna(0).sum()
+                total_row[col] = f"{int(val):,}".replace(",", ".")
+                sums.append(val)
+            except:
+                total_row[col] = "0"
+                sums.append(0)
+
+        # Recálculo de variaciones para el Total General basado en las sumas reales
+        if '% Var Cant' in df.columns and len(sums) >= 4:
+            def calc_v(n, b): return ((n - b) / b * 100) if b > 0 else 0
+            # sums[0]=ObjCant, sums[1]=ObjMont, sums[2]=Cant26, sums[3]=Mont26
+            total_row['% Var Cant'] = f"{calc_v(sums[2], sums[0]):+.1f}%"
+            total_row['% Var Mont'] = f"{calc_v(sums[3], sums[1]):+.1f}%"
+        elif len(sums) >= 2:
+            v_obj, v_real = sums[0], sums[1]
+            var = ((v_real - v_obj) / v_obj * 100) if v_obj > 0 else 0
+            v_name = 'Var %' if 'Var %' in df.columns else 'Variación'
+            if v_name in total_row: total_row[v_name] = f"{var:+.1f}%"
+
+        return pd.concat([df_res, pd.DataFrame([total_row])], ignore_index=True)
+
     @staticmethod
     def _sanitize_dataframe(df, objetivo_pct=0, meses_filtro=None):
-        """Limpia datos, aplica incremento objetivo al 2025 y filtra estrictamente por meses."""
+        """Limpia datos y construye el Identificador Único para evitar cruce de clientes."""
         if df is None or df.empty: return pd.DataFrame()
-
-        # Trabajamos con copia y forzamos float64 para evitar desbordamientos de enteros
         df = df.copy()
+
+        # Asegurar tipos básicos
         df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
-        df['monto'] = pd.to_numeric(df['monto'], errors='coerce').fillna(0).astype(float)
+        df = df.dropna(subset=['fecha'])
         df['anio'] = df['fecha'].dt.year
+        df['mes_idx'] = df['fecha'].dt.month
+        df['monto'] = pd.to_numeric(df['monto'], errors='coerce').fillna(0)
+        df['cantidad'] = pd.to_numeric(df['cantidad'], errors='coerce').fillna(0)
 
-        # Mapeo de nombre de mes para el filtro
-        df['mes_nombre'] = df['fecha'].dt.month.map(lambda x: SalesLogic.MESES_ES[x].split(" - ")[1] if pd.notnull(x) else None)
+        factor = float(1 + (objetivo_pct / 100))
+        df['monto_25'] = np.where(df['anio'] == 2025, df['monto'], 0.0)
+        df['monto_26'] = np.where(df['anio'] == 2026, df['monto'], 0.0)
+        df['cant_25'] = np.where(df['anio'] == 2025, df['cantidad'], 0.0)
+        df['cant_26'] = np.where(df['anio'] == 2026, df['cantidad'], 0.0)
 
-        # 1. FILTRO DE MESES DESTRUCTIVO (Si no está en la lista, el dato se borra aquí mismo)
-        if meses_filtro and len(meses_filtro) > 0:
+        df['monto_obj'] = df['monto_25'] * factor
+        df['cant_obj'] = df['cant_25'] * factor
+
+        # Filtrado de meses
+        df['mes_nombre'] = df['mes_idx'].map(lambda x: SalesLogic.MESES_ES[x].split(" - ")[1])
+        if meses_filtro:
             df = df[df['mes_nombre'].isin(meses_filtro)]
 
-        # 2. Aplicación del Monto Objetivo al Año Base (2025)
-        # Usamos float para evitar el error de números negativos extraños
-        factor = float(1 + (objetivo_pct / 100))
-        mask_25 = df['anio'] == 2025
-        df.loc[mask_25, 'monto'] = df.loc[mask_25, 'monto'] * factor
+        # --- CORRECCIÓN CRÍTICA DE IDENTIFICADOR ---
+        # Limpiamos la columna cadena de cualquier residuo de base de datos
+        df['cadena'] = df['cadena'].astype(str).replace(['SIN CADENA', 'None', 'nan', 'S/C', 'None ', ' nan'], np.nan)
 
-        # Identificador robusto
-        df['Identificador'] = df['cadena'].astype(str).replace(['SIN CADENA', 'None', 'nan', 'NaN', ''], np.nan).fillna(df['cliente'])
+        # El Identificador ahora es sagrado: Si hay cadena, manda la cadena; si no, el nombre del cliente.
+        # Se aplica strip() para evitar que "CLIENTE A" y "CLIENTE A " se consideren distintos
+        df['cliente'] = df['cliente'].astype(str).str.strip()
+        df['Identificador'] = df['cadena'].fillna(df['cliente']).str.strip()
+
         return df
 
     @staticmethod
-    def _add_total_row(df_pivot, index_name="TOTAL GENERAL", sort_by_performance=True):
-        """Calcula variaciones y añade la fila de totales al final del DataFrame."""
-        if df_pivot.empty: return df_pivot
+    def process_seller_drilldown(df, objetivo_pct, meses_filtro):
+        df_p = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
+        if df_p.empty: return pd.DataFrame(), pd.DataFrame()
 
-        for anio in [2025, 2026]:
-            if anio not in df_pivot.columns: df_pivot[anio] = 0.0
+        # Ranking
+        rank = df_p.groupby('vendedor').agg({'monto_obj': 'sum', 'monto_26': 'sum'}).reset_index()
+        rank['Variación'] = np.where(rank['monto_obj'] > 0, (rank['monto_26'] - rank['monto_obj']) / rank['monto_obj'] * 100, 0.0)
+        rank.columns = ['Vendedor', f'Objetivo (+{objetivo_pct}%)', 'Venta 2026', 'Variación']
 
-        # Protección contra división por cero y valores infinitos
-        with np.errstate(divide='ignore', invalid='ignore'):
-            df_pivot['Variación %'] = ((df_pivot[2026] - df_pivot[2025]) / df_pivot[2025] * 100)
-            df_pivot['Variación %'] = df_pivot['Variación %'].replace([np.inf, -np.inf], 0).fillna(0)
+        for col in rank.columns[1:3]:
+            rank[col] = rank[col].apply(lambda x: f"{int(x):,}".replace(",", "."))
+        rank['Variación'] = rank['Variación'].apply(lambda x: f"{x:+.1f}%")
+        rank_final = SalesLogic._add_total_data(rank, 'Vendedor')
 
-        if sort_by_performance:
-            df_body = df_pivot.sort_values(by='Variación %', ascending=False)
-        else:
-            df_body = df_pivot.sort_index()
+        # Matriz 10 Columnas (Vendedor > Identificador > Marca)
+        hier = df_p.groupby(['vendedor', 'Identificador', 'marca', 'mes_idx']).agg({
+            'cant_obj': 'sum', 'cant_26': 'sum', 'monto_obj': 'sum', 'monto_26': 'sum'
+        }).reset_index()
 
-        totales = pd.DataFrame({
-            2025: [df_pivot[2025].sum()],
-            2026: [df_pivot[2026].sum()]
-        }, index=[f"== {index_name} =="])
+        rows = []
+        vendedores_sorted = rank.sort_values(rank.columns[2], ascending=False)['Vendedor'].tolist()
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            totales['Variación %'] = ((totales[2026] - totales[2025]) / totales[2025] * 100)
-            totales['Variación %'] = totales['Variación %'].replace([np.inf, -np.inf], 0).fillna(0)
+        for v in vendedores_sorted:
+            df_v = hier[hier['vendedor'] == v]
+            if df_v.empty: continue
+            for c in df_v['Identificador'].unique():
+                df_c = df_v[df_v['Identificador'] == c]
+                for m in df_c['marca'].unique():
+                    df_m = df_c[df_c['marca'] == m]
+                    for _, r in df_m.iterrows():
+                        rows.append(SalesLogic._row10(r, v, c, m, r['mes_idx']))
+                    rows.append(SalesLogic._row10(df_m.sum(numeric_only=True), v, c, f"Σ MARCA {m}", 0))
+                rows.append(SalesLogic._row10(df_c.sum(numeric_only=True), v, f"Σ CLIENTE {c}", "---", 0))
+            rows.append(SalesLogic._row10(df_v.sum(numeric_only=True), f"== TOTAL {v} ==", "---", "---", 0))
 
-        return pd.concat([df_body, totales])
-
-    @staticmethod
-    def _apply_formatting(df, cols_to_format, objetivo_pct=0):
-        """Transforma números en strings con formato moneda (puntos) y signo de variación."""
-        if df.empty: return df
-        res = df.copy()
-        for col in [2025, 2026]:
-            if col in res.columns:
-                # CAMBIO: Etiqueta dinámica con el porcentaje del slider
-                label = f"Venta {col}" if col == 2026 else f"Objetivo 2025 (+{objetivo_pct}%)"
-                # Formateo seguro para Guaraníes (sin decimales)
-                res[label] = res[col].apply(lambda x: f"{max(0, x):,.0f}".replace(",", "."))
-
-        if 'Variación %' in res.columns:
-            res['Variación'] = res['Variación %'].apply(lambda x: f"{x:+.1f}%")
-
-        return res
+        return rank_final, pd.DataFrame(rows)
 
     @staticmethod
-    def get_kpis(df, objetivo_pct=0, meses_filtro=None):
-        """Calcula KPIs considerando el filtro de meses."""
-        df = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
-        if df.empty: return {"clientes_25": 0, "clientes_26": 0, "solo_25": 0, "solo_26": 0, "atendimiento": 0}
-
-        ids_25 = set(df[df['anio'] == 2025]['Identificador'].unique())
-        ids_26 = set(df[df['anio'] == 2026]['Identificador'].unique())
-
-        recurrentes = len(ids_25 & ids_26)
+    def _row10(d, v, c, m, midx):
+        def vp(n, b): return ((n - b) / b * 100) if b > 0 else 0
+        mes_txt = SalesLogic.MESES_ABREVIADOS.get(midx, "---")
         return {
-            "clientes_25": len(ids_25),
-            "clientes_26": len(ids_26),
-            "solo_25": len(ids_25 - ids_26),
-            "solo_26": len(ids_26 - ids_25),
-            "atendimiento": (recurrentes / len(ids_25) * 100) if ids_25 else 0
+            'Vendedor': v, 'Cadena': c, 'Marca': m, 'Mes': mes_txt,
+            'Obj. 25 Cant': f"{int(d.get('cant_obj', 0)):,}".replace(",", "."),
+            'Obj. 25 Mont': f"{int(d.get('monto_obj', 0)):,}".replace(",", "."),
+            'Cant 26': f"{int(d.get('cant_26', 0)):,}".replace(",", "."),
+            'Mont 26': f"{int(d.get('monto_26', 0)):,}".replace(",", "."),
+            '% Var Cant': f"{vp(d.get('cant_26', 0), d.get('cant_obj', 0)):+.1f}%",
+            '% Var Mont': f"{vp(d.get('monto_26', 0), d.get('monto_obj', 0)):+.1f}%"
         }
 
     @staticmethod
-    def process_comparison_matrix(df, objetivo_pct=0, meses_filtro=None):
-        """Genera la matriz mensual comparativa filtrada."""
-        df = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
-        if df.empty: return pd.DataFrame()
+    def process_comparison_matrix(df, objetivo_pct, meses_filtro):
+        df_p = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
+        if df_p.empty: return pd.DataFrame()
+        res = df_p.groupby(['mes_idx']).agg({'monto_obj': 'sum', 'monto_26': 'sum'}).reset_index()
+        res['Mes'] = res['mes_idx'].map(SalesLogic.MESES_ES)
+        res['Var %'] = np.where(res['monto_obj'] > 0, ((res['monto_26'] - res['monto_obj']) / res['monto_obj'] * 100), 0.0)
 
-        df['Mes'] = df['fecha'].dt.month.map(SalesLogic.MESES_ES)
-
-        # Pivotamos. Al estar sanitizado el DF, solo aparecerán los meses seleccionados.
-        matrix = df.pivot_table(index='Mes', columns='anio', values='monto', aggfunc='sum').fillna(0)
-
-        res = SalesLogic._add_total_row(matrix, sort_by_performance=False)
-        res = res.reset_index().rename(columns={'index': 'Mes'})
-
-        # CAMBIO: Nombres de columnas dinámicos con el porcentaje
-        col_obj = f"Objetivo 2025 (+{objetivo_pct}%)"
-        col_real = f"Monto 2026 (Gs.)"
-
-        res[col_obj] = res[2025].apply(lambda x: f"{max(0, x):,.0f}".replace(",", "."))
-        res[col_real] = res[2026].apply(lambda x: f"{max(0, x):,.0f}".replace(",", "."))
-
-        res['Var %'] = res['Variación %'].apply(lambda x: f"{x:+.1f}%")
-        return res[['Mes', col_obj, col_real, 'Var %']]
+        col_obj = f"Objetivo (+{objetivo_pct}%)"
+        res = res.rename(columns={'monto_obj': col_obj, 'monto_26': 'Monto 2026 (Gs.)'})
+        for col in [col_obj, 'Monto 2026 (Gs.)']:
+            res[col] = res[col].apply(lambda x: f"{int(x):,}".replace(",", "."))
+        res['Var %'] = res['Var %'].apply(lambda x: f"{x:+.1f}%")
+        return SalesLogic._add_total_data(res[['Mes', col_obj, 'Monto 2026 (Gs.)', 'Var %']], 'Mes')
 
     @staticmethod
-    def process_customer_opportunity(df, objetivo_pct=0, meses_filtro=None):
-        """Segmenta la cartera filtrada."""
-        df = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
-        if df.empty: return {"crecimiento": pd.DataFrame(), "decrecimiento": pd.DataFrame(), "sin_compra": pd.DataFrame()}
+    def process_brand_drilldown(df, objetivo_pct, meses_filtro):
+        df_p = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
+        if df_p.empty: return pd.DataFrame(), pd.DataFrame()
 
-        pivot = df.pivot_table(index='Identificador', columns='anio', values='monto', aggfunc='sum').fillna(0)
-        for anio in [2025, 2026]:
-            if anio not in pivot.columns: pivot[anio] = 0.0
+        rank = df_p.groupby('marca').agg({'monto_obj': 'sum', 'monto_26': 'sum'}).reset_index()
+        det = df_p.groupby(['marca', 'Identificador', 'vendedor']).agg({'monto_obj': 'sum', 'monto_26': 'sum'}).reset_index()
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            pivot['Variación %'] = ((pivot[2026] - pivot[2025]) / pivot[2025] * 100).replace([np.inf, -np.inf], 0).fillna(0)
+        def _fmt(df_in, head, label_col):
+            df_in = df_in.sort_values('monto_26', ascending=False)
+            df_in['Var'] = np.where(df_in['monto_obj'] > 0, (df_in['monto_26']-df_in['monto_obj'])/df_in['monto_obj']*100, 0)
+            df_in.columns = head + [f"Objetivo (+{objetivo_pct}%)", "Venta 2026", "Variación"]
+            for col in df_in.columns[-3:-1]:
+                df_in[col] = df_in[col].apply(lambda x: f"{int(x):,}".replace(",", "."))
+            df_in["Variación"] = df_in["Variación"].apply(lambda x: f"{x:+.1f}%")
+            return SalesLogic._add_total_data(df_in, label_col)
 
-        def _final_format(df_seg, label):
-            if df_seg.empty: return pd.DataFrame()
-            res = SalesLogic._add_total_row(df_seg[[2025, 2026]], label)
-            res = res.reset_index().rename(columns={'index': 'Identificador'})
-            formatted = SalesLogic._apply_formatting(res, [2025, 2026], objetivo_pct)
-            # Retornar con el nombre de columna dinámico
-            col_target = f"Objetivo 2025 (+{objetivo_pct}%)"
-            return formatted[['Identificador', col_target, 'Venta 2026', 'Variación']]
+        return _fmt(rank, ['Marca'], 'Marca'), _fmt(det, ['Marca', 'Cliente', 'Vendedor'], 'Marca')
+
+    @staticmethod
+    def process_customer_opportunity(df, objetivo_pct, meses_filtro):
+        df_p = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
+        if df_p.empty: return {k: pd.DataFrame() for k in ['crecimiento', 'decrecimiento', 'sin_compra']}
+
+        piv = df_p.groupby('Identificador').agg({'monto_obj': 'sum', 'monto_26': 'sum'}).reset_index()
+
+        def _f(s):
+            if s.empty: return pd.DataFrame(columns=['Identificador', f"Objetivo (+{objetivo_pct}%)", "Venta 2026", "Variación"])
+            s = s.sort_values('monto_26', ascending=False)
+            s['Var'] = np.where(s['monto_obj'] > 0, (s['monto_26']-s['monto_obj'])/s['monto_obj']*100, 0)
+            s.columns = ['Identificador', f"Objetivo (+{objetivo_pct}%)", "Venta 2026", "Variación"]
+            for c in s.columns[1:3]: s[c] = s[c].apply(lambda x: f"{int(x):,}".replace(",", "."))
+            s['Variación'] = s['Variación'].apply(lambda x: f"{x:+.1f}%")
+            return SalesLogic._add_total_data(s, 'Identificador')
 
         return {
-            "crecimiento": _final_format(pivot[pivot['Variación %'] > 0], "TOTAL CRECIMIENTO"),
-            "decrecimiento": _final_format(pivot[(pivot['Variación %'] <= 0) & (pivot[2026] > 0)], "TOTAL DECRECIMIENTO"),
-            "sin_compra": _final_format(pivot[(pivot[2026] == 0) & (pivot[2025] > 0)], "TOTAL SIN COMPRA")
+            "crecimiento": _f(piv[piv['monto_26'] > piv['monto_obj']]),
+            "decrecimiento": _f(piv[(piv['monto_26'] <= piv['monto_obj']) & (piv['monto_26'] > 0)]),
+            "sin_compra": _f(piv[(piv['monto_26'] == 0) & (piv['monto_obj'] > 0)])
         }
 
     @staticmethod
-    def process_brand_drilldown(df, objetivo_pct=0, meses_filtro=None):
-        """Pestaña Marcas filtrada."""
-        df = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
-        if df.empty: return pd.DataFrame(), pd.DataFrame()
-
-        pivot_gen = df.pivot_table(index='marca', columns='anio', values='monto', aggfunc='sum').fillna(0)
-        res_gen = SalesLogic._add_total_row(pivot_gen, "TOTAL MARCAS")
-        tabla_gen = SalesLogic._apply_formatting(res_gen.reset_index().rename(columns={'index': 'Marca'}), [2025, 2026], objetivo_pct)
-
-        hier = df.groupby(['marca', 'Identificador', 'vendedor', 'anio'])['monto'].sum().unstack('anio').fillna(0)
-        for anio in [2025, 2026]:
-            if anio not in hier.columns: hier[anio] = 0.0
-
-        hier['Variación %'] = ((hier[2026] - hier[2025]) / hier[2025] * 100).replace([np.inf, -np.inf], 0).fillna(0)
-        marcas_order = pivot_gen.sort_values(by=2026, ascending=False).index
-
-        final_rows = []
-        for marca in marcas_order:
-            df_marca = hier.loc[marca].sort_values('Variación %', ascending=False)
-            for idx, row in df_marca.iterrows():
-                final_rows.append({
-                    'Marca': marca, 'Cliente': idx[0], 'Vendedor': idx[1],
-                    2025: row[2025], 2026: row[2026], 'Variación %': row['Variación %']
-                })
-            final_rows.append({
-                'Marca': f"Σ SUBTOTAL {marca}", 'Cliente': '---', 'Vendedor': '---',
-                2025: df_marca[2025].sum(), 2026: df_marca[2026].sum(),
-                'Variación %': ((df_marca[2026].sum() - df_marca[2025].sum()) / df_marca[2025].sum() * 100) if df_marca[2025].sum() > 0 else 0
-            })
-
-        tabla_det = SalesLogic._apply_formatting(pd.DataFrame(final_rows), [2025, 2026], objetivo_pct)
-        col_target = f"Objetivo 2025 (+{objetivo_pct}%)"
-        return tabla_gen[['Marca', col_target, 'Venta 2026', 'Variación']], \
-                tabla_det[['Marca', 'Cliente', 'Vendedor', col_target, 'Venta 2026', 'Variación']]
-
-    @staticmethod
-    def process_seller_drilldown(df, objetivo_pct=0, meses_filtro=None):
-        """Pestaña Vendedores filtrada."""
-        df = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
-        if df.empty: return pd.DataFrame(), pd.DataFrame()
-
-        pivot_gen = df.pivot_table(index='vendedor', columns='anio', values='monto', aggfunc='sum').fillna(0)
-        res_gen = SalesLogic._add_total_row(pivot_gen, "TOTAL VENDEDORES")
-        tabla_gen = SalesLogic._apply_formatting(res_gen.reset_index().rename(columns={'index': 'Vendedor'}), [2025, 2026], objetivo_pct)
-
-        hier = df.groupby(['vendedor', 'marca', 'Identificador', 'anio'])['monto'].sum().unstack('anio').fillna(0)
-        for anio in [2025, 2026]:
-            if anio not in hier.columns: hier[anio] = 0.0
-
-        hier['Variación %'] = ((hier[2026] - hier[2025]) / hier[2025] * 100).replace([np.inf, -np.inf], 0).fillna(0)
-        vendedores_order = pivot_gen.sort_values(by=2026, ascending=False).index
-
-        final_rows = []
-        for vend in vendedores_order:
-            df_vend = hier.loc[vend]
-            marcas_in_vend = df_vend.groupby('marca')[[2025, 2026]].sum()
-            marcas_order = marcas_in_vend.sort_values(by=2026, ascending=False).index
-
-            for marca in marcas_order:
-                df_cli = df_vend.loc[marca].sort_values('Variación %', ascending=False)
-                for idx, row in df_cli.iterrows():
-                    final_rows.append({
-                        'Vendedor': vend, 'Marca': marca, 'Cliente': idx,
-                        2025: row[2025], 2026: row[2026], 'Variación %': row['Variación %']
-                    })
-                final_rows.append({
-                    'Vendedor': vend, 'Marca': f"Σ {marca}", 'Cliente': '---',
-                    2025: df_cli[2025].sum(), 2026: df_cli[2026].sum(),
-                    'Variación %': ((df_cli[2026].sum() - df_cli[2025].sum()) / df_cli[2025].sum() * 100) if df_cli[2025].sum() > 0 else 0
-                })
-
-            final_rows.append({
-                'Vendedor': f"Σ TOTAL {vend}", 'Marca': '---', 'Cliente': '---',
-                2025: df_vend[2025].sum(), 2026: df_vend[2026].sum(),
-                'Variación %': ((df_vend[2026].sum() - df_vend[2025].sum()) / df_vend[2025].sum() * 100) if df_vend[2025].sum() > 0 else 0
-            })
-
-        tabla_det = SalesLogic._apply_formatting(pd.DataFrame(final_rows), [2025, 2026], objetivo_pct)
-        col_target = f"Objetivo 2025 (+{objetivo_pct}%)"
-        return tabla_gen[['Vendedor', col_target, 'Venta 2026', 'Variación']], \
-                tabla_det[['Vendedor', 'Marca', 'Cliente', col_target, 'Venta 2026', 'Variación']]
-# forced update: 02/02/2026 08:59:11
+    def get_kpis(df, objetivo_pct, meses_filtro):
+        df_proc = SalesLogic._sanitize_dataframe(df, objetivo_pct, meses_filtro)
+        if df_proc.empty: return {'clientes_26': 0, 'atendimiento': 0}
+        c26 = df_proc[df_proc['monto_26'] > 0]['codigo_cliente'].nunique()
+        total = df_proc['codigo_cliente'].nunique()
+        return {'clientes_26': c26, 'atendimiento': (c26 / total * 100) if total > 0 else 0}

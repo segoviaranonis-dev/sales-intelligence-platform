@@ -1,35 +1,52 @@
 # Ubicación: C:\Users\hecto\Documents\Prg_locales\I_R_G\modules\sales_report\ui.py
 import streamlit as st
 from datetime import datetime
+import pandas as pd
 from core.queries import QueryCenter
 from core.styles import apply_styles, header_section, card_style
 from .logic import SalesLogic
 from .export import ExportManager
+import sys
 
 def color_variance(val):
     """Aplica colores dinámicos a las variaciones porcentuales."""
     try:
-        if not val or val == 'nan': return None
+        if val is None or str(val) in ['nan', 'None', '']: return None
         clean_val = float(str(val).replace('%', '').replace('+', '').replace('.', '').replace(',', '.'))
-        color = 'color: #15803D;' if clean_val > 0 else 'color: #B91C1C;' if clean_val < 0 else 'color: #64748B;'
-        return color
-    except:
-        return None
+        if clean_val > 0.1: return 'color: #15803D; font-weight: bold;'
+        if clean_val < -0.1: return 'color: #B91C1C; font-weight: bold;'
+        return 'color: #64748B;'
+    except: return None
 
 def style_subtotals(row):
-    """Resalta visualmente cualquier fila que sea un subtotal (Σ) o un total (==)."""
+    """Resalta visualmente subtotales por Marca, Cliente y Totales Generales."""
     row_str = " ".join(row.astype(str)).upper()
-    if "Σ" in row_str or "TOTAL" in row_str or "==" in row_str:
-        return ['background-color: #F1F5F9; font-weight: bold; border-top: 1.5px solid #CBD5E1; color: #1E293B;'] * len(row)
+    if "TOTAL" in row_str or "==" in row_str:
+        return ['background-color: #F0F9FF; font-weight: bold; border-top: 1.5px solid #BAE6FD; color: #0369A1;'] * len(row)
+    if "Σ CLIENTE" in row_str:
+        return ['background-color: #F0FDF4; font-weight: bold; color: #166534;'] * len(row)
+    if "Σ MARCA" in row_str:
+        return ['background-color: #FFF7ED; font-weight: bold; color: #9A3412; font-style: italic;'] * len(row)
     return [''] * len(row)
 
+def safe_style_dataframe(df, subset_cols):
+    """Aplica estilos de forma segura verificando existencia de columnas."""
+    if df is None or df.empty: return df
+    existing_cols = [c for c in subset_cols if c in df.columns]
+    styled_df = df.style
+    if existing_cols:
+        styled_df = styled_df.map(color_variance, subset=existing_cols)
+    return styled_df.apply(style_subtotals, axis=1)
+
 def clean_duplicate_labels(df, columns):
-    """Oculta nombres repetidos consecutivos para emular una tabla dinámica."""
-    if df.empty: return df
+    """Oculta nombres repetidos para un diseño minimalista."""
+    if df is None or df.empty: return df
     df_clean = df.copy()
     for col in columns:
-        mask = (df_clean[col] == df_clean[col].shift()) & (~df_clean.astype(str).apply(lambda x: x.str.contains("Σ|TOTAL|==", na=False)).any(axis=1))
-        df_clean.loc[mask, col] = ""
+        if col in df_clean.columns:
+            is_summary = df_clean.astype(str).apply(lambda x: x.str.contains("Σ|TOTAL|==", na=False)).any(axis=1)
+            mask = (df_clean[col] == df_clean[col].shift()) & (~is_summary)
+            df_clean.loc[mask, col] = ""
     return df_clean
 
 def render_sales_report_interface():
@@ -37,188 +54,103 @@ def render_sales_report_interface():
     header_section("Inteligencia de Mercado", "Visión 360° de Cartera y Desempeño")
 
     with st.sidebar:
-        st.title("🛡️ Filtros de Control")
+        st.title("🛡️ Centro de Control")
+        st.subheader("🎯 Objetivo")
+        objetivo_pct = st.select_slider("Incremento sobre 2025 (%):", options=list(range(0, 105, 5)), value=20)
 
-        st.subheader("🎯 Incremento Objetivo (%)")
-        objetivo_pct = st.select_slider(
-            "Sobre Año Base (2025):",
-            options=list(range(0, 105, 5)),
-            value=20,
-            help="Define el aumento porcentual que se aplicará a las ventas del 2025."
-        )
-        st.divider()
+        tipo_opciones = ["CALZADOS", "VARIOS"]
+        tipo = st.selectbox("Departamento:", options=tipo_opciones, index=0)
 
-        tipo_opciones = QueryCenter.get_filter_options("descp_tipo", "tipo")
-        index_calzados = tipo_opciones.index("CALZADOS") if "CALZADOS" in tipo_opciones else 0
-        tipo = st.selectbox("Tipo:", options=tipo_opciones, index=index_calzados)
-
-        categoria_humana = st.selectbox("Categoría:", options=list(SalesLogic.CATEGORIA_MAP.keys()), index=2)
-        id_categoria = SalesLogic.CATEGORIA_MAP[categoria_humana]
+        cat_map = SalesLogic.CATEGORIA_MAP
+        categoria_sel = st.selectbox("Categoría de Venta:", options=list(cat_map.keys()), index=2)
 
         st.divider()
+        periodo_tipo = st.radio("Sugerencia de Periodo:", ["1er Semestre", "2do Semestre", "Personalizado"], horizontal=True)
+        meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
-        st.subheader("📅 Periodo Comparativo")
-        periodo_tipo = st.radio("Preselección:", ["1er Semestre", "2do Semestre", "Personalizado"], horizontal=True)
+        if periodo_tipo == "1er Semestre": default_meses = meses_nombres[0:6]
+        elif periodo_tipo == "2do Semestre": default_meses = meses_nombres[6:12]
+        else: default_meses = st.session_state.get('last_months', meses_nombres[0:6])
 
-        meses_nombres = [
-            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-        ]
+        meses_sel = st.multiselect("Meses a Evaluar:", options=meses_nombres, default=default_meses)
+        st.session_state.last_months = meses_sel
 
-        # Lógica de preselección de meses corregida
-        if periodo_tipo == "1er Semestre":
-            default_meses = meses_nombres[0:6]
-        elif periodo_tipo == "2do Semestre":
-            default_meses = meses_nombres[6:12]
-        else:
-            # Si es personalizado, mantenemos lo que el usuario elija o el semestre 1 por defecto
-            default_meses = meses_nombres[0:6]
+        filtros_base = {"tipo": tipo, "categoria": cat_map[categoria_sel], "start_date": datetime(2025, 1, 1), "end_date": datetime(2026, 12, 31)}
+        df_universo = QueryCenter.get_main_sales_query(filtros_base)
+        opciones = QueryCenter.get_dynamic_filters(df_universo)
 
-        meses_sel = st.multiselect("Seleccionar Meses:", options=meses_nombres, default=default_meses)
+        with st.expander("🔍 Filtros de Granularidad"):
+            cadena = st.multiselect("Cadenas:", options=opciones['cadenas'])
+            vendedor = st.multiselect("Vendedores:", options=opciones['vendedores'])
+            marca = st.multiselect("Marcas:", options=opciones['marcas'])
+            cliente = st.multiselect("Clientes:", options=opciones['clientes'])
+            # RESTAURADO: Filtro por código de cliente
+            codigo_cliente = st.multiselect("Código Cliente (ID):", options=opciones['codigos'])
 
-        col_f1, col_f2 = st.columns(2)
-        with col_f1: st.info("**Base:** 2025")
-        with col_f2: st.success("**Actual:** 2026")
+        generar = st.button("🚀 GENERAR ANÁLISIS ÍNTEGRO", type="primary", use_container_width=True)
 
-        st.divider()
-
-        # --- FILTROS DE CARTERA ---
-        query_marcas_dept = f"""
-            SELECT DISTINCT m.descp_marca
-            FROM registro_ventas_general v
-            INNER JOIN tipo t ON CAST(v.id_tipo AS TEXT) = CAST(t.id_tipo AS TEXT)
-            INNER JOIN marca m ON CAST(v.id_marca AS TEXT) = CAST(m.id_marca AS TEXT)
-            WHERE UPPER(t.descp_tipo) = '{tipo.upper()}'
-            ORDER BY m.descp_marca
-        """
-        try:
-            from core.database import get_dataframe
-            marcas_filtradas = get_dataframe(query_marcas_dept)['descp_marca'].tolist()
-        except:
-            marcas_filtradas = []
-
-        marca_sel = st.multiselect("Filtrar Marcas:", options=marcas_filtradas)
-        marca = marca_sel if marca_sel else "Todos"
-        cadena = st.multiselect("Cadena de Negocio:", options=QueryCenter.get_filter_options("descp_cadena", "cadena"))
-        cadena = cadena if cadena else "Todos"
-        cliente = st.multiselect("Nombre del Cliente:", options=QueryCenter.get_filter_options("descp_cliente", "cliente"))
-        id_cliente = st.multiselect("Código de Cliente:", options=QueryCenter.get_filter_options("id_cliente", "cliente"))
-
-        cliente = cliente if cliente else "Todos"
-        id_cliente = id_cliente if id_cliente else "Todos"
-
-        generar = st.button("🚀 GENERAR ANÁLISIS", type="primary", use_container_width=True)
-
-    filtros_activos = {
-        "tipo": tipo, "categoria": id_categoria, "marca": marca,
-        "cliente": cliente, "cadena": cadena, "id_cliente": id_cliente,
+    filtros_finales = {
+        "tipo": tipo, "categoria": cat_map[categoria_sel],
+        "cadena": cadena if cadena else "Todos",
+        "vendedor": vendedor if vendedor else "Todos",
+        "marca": marca if marca else "Todos",
+        "cliente": cliente if cliente else "Todos",
+        "codigo_cliente": codigo_cliente if codigo_cliente else "Todos",
         "start_date": datetime(2025, 1, 1), "end_date": datetime(2026, 12, 31)
     }
 
-    if 'df_ventas' not in st.session_state:
-        st.session_state.df_ventas = QueryCenter.get_main_sales_query(filtros_activos)
+    if generar or 'df_ventas' not in st.session_state:
+        st.session_state.df_ventas = QueryCenter.get_main_sales_query(filtros_finales)
 
-    if generar:
-        st.session_state.df_ventas = QueryCenter.get_main_sales_query(filtros_activos)
+    df_raw = st.session_state.df_ventas
 
-    if 'df_ventas' in st.session_state and not st.session_state.df_ventas.empty:
-        df = st.session_state.df_ventas
+    if df_raw is not None and not df_raw.empty:
+        t_evolucion = SalesLogic.process_comparison_matrix(df_raw, objetivo_pct, meses_sel)
+        d_cartera = SalesLogic.process_customer_opportunity(df_raw, objetivo_pct, meses_sel)
+        t_mar_gen, t_mar_det = SalesLogic.process_brand_drilldown(df_raw, objetivo_pct, meses_sel)
+        t_ven_gen, t_ven_det = SalesLogic.process_seller_drilldown(df_raw, objetivo_pct, meses_sel)
+        kpis = SalesLogic.get_kpis(df_raw, objetivo_pct, meses_sel)
 
-        # --- CRÍTICO: PASAR objetivo_pct Y meses_sel A LA LÓGICA ---
-        # Ahora la lógica sanitizará el dataframe antes de procesar cada tabla
-        tabla_mes = SalesLogic.process_comparison_matrix(df, objetivo_pct, meses_sel)
-        dict_cartera = SalesLogic.process_customer_opportunity(df, objetivo_pct, meses_sel)
-        tabla_mar_gen, tabla_mar_det = SalesLogic.process_brand_drilldown(df, objetivo_pct, meses_sel)
-        tabla_ven_gen, tabla_ven_det = SalesLogic.process_seller_drilldown(df, objetivo_pct, meses_sel)
-
-        tab_gen, tab_cli, tab_mar, tab_ven = st.tabs([
-            "📊 Resumen General", "👥 Análisis Clientes",
-            "🏷️ Desempeño Marcas", "💼 Gestión Vendedores"
-        ])
+        tab_gen, tab_cli, tab_mar, tab_ven = st.tabs(["📊 Dashboard", "👥 Clientes", "🏷️ Marcas", "💼 Vendedores"])
 
         with tab_gen:
-            col_t1, col_t2 = st.columns([3, 1])
-            with col_t1: st.subheader("Resumen Ejecutivo (Cronológico)")
-            with col_t2:
-                full_report = ExportManager.generate_consolidated_report({
-                    "Evolución Mensual": tabla_mes,
-                    "Clientes: Crecimiento": dict_cartera['crecimiento'],
-                    "Clientes: Riesgo": dict_cartera['decrecimiento'],
-                    "Clientes: Sin Compra": dict_cartera['sin_compra'],
-                    "Marcas: Resumen": tabla_mar_gen,
-                    "Vendedores: Resumen": tabla_ven_gen
-                })
-                st.download_button("📄 Informe Completo (PDF)", data=full_report,
-                                  file_name="Reporte_Ventas_360.pdf", mime="application/pdf")
-
-            # KPIs sincronizados con los filtros
-            kpis = SalesLogic.get_kpis(df, objetivo_pct, meses_sel)
-            m1, m2, m3, m4, m5 = st.columns(5)
-            with m1: card_style("Clientes 2025", f"{kpis['clientes_25']}")
-            with m2: card_style("Clientes 2026", f"{kpis['clientes_26']}")
-            with m3: card_style("Solo 2025", f"{kpis['solo_25']}", is_delta=True, delta_val="Riesgo")
-            with m4: card_style("Solo 2026", f"{kpis['solo_26']}", is_delta=True, delta_val="Nuevos")
-            with m5: card_style("% Retención", f"{kpis['atendimiento']:.1f}%")
-
-            st.markdown("### 📈 Evolución Mensual Comparativa")
-            st.dataframe(tabla_mes.style.map(color_variance, subset=['Var %']).apply(style_subtotals, axis=1),
-                         width='stretch', hide_index=True)
+            m1, m2, m3 = st.columns(3)
+            with m1: card_style("Alcance Clientes 2026", f"{kpis['clientes_26']}")
+            with m2: card_style("% Atendimiento", f"{kpis['atendimiento']:.1f}%")
+            with m3:
+                pdf_full = ExportManager.generate_consolidated_report({"Evolución": t_evolucion, "Ranking": t_ven_gen, "Marcas": t_mar_gen})
+                st.download_button("📄 PDF Informe Completo", data=pdf_full, file_name="Informe_General.pdf", use_container_width=True)
+            st.subheader("📈 Evolución Mensual")
+            st.dataframe(safe_style_dataframe(t_evolucion, ['Var %']), use_container_width=True, hide_index=True)
 
         with tab_cli:
-            st.subheader("Segmentación Estratégica de Cartera")
-            config = [
-                ('crecimiento', '✅ CLIENTES CON CRECIMIENTO', 'info'),
-                ('decrecimiento', '⚠️ CLIENTES EN RIESGO (CAÍDA)', 'warning'),
-                ('sin_compra', '📉 OPORTUNIDADES PERDIDAS (SIN COMPRA)', 'error')
-            ]
-            for key, label, func in config:
-                with st.expander(label, expanded=(key=='crecimiento')):
-                    df_seg = dict_cartera[key]
-                    c1, c2 = st.columns([3, 1])
-                    with c1: getattr(st, func)(f"Registros detectados: {max(0, len(df_seg)-1)}")
-                    with c2:
-                        pdf = ExportManager.generate_single_table_pdf(df_seg, label)
-                        st.download_button(f"📥 PDF {key.title()}", data=pdf, file_name=f"{key}.pdf", key=f"btn_{key}")
-                    st.dataframe(df_seg.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1), width='stretch', hide_index=True)
+            for key, label in [('crecimiento', '✅ Crecimiento'), ('decrecimiento', '⚠️ Riesgo'), ('sin_compra', '📉 Sin Compra')]:
+                c1, c2 = st.columns([0.8, 0.2])
+                with c1: st.subheader(label)
+                with c2: # RESTAURADO: Botón PDF individual para Clientes
+                    pdf_cli = ExportManager.generate_consolidated_report({label: d_cartera[key]})
+                    st.download_button(f"📥 PDF {key.capitalize()}", data=pdf_cli, file_name=f"Reporte_Clientes_{key}.pdf", key=f"btn_cli_{key}")
+                st.dataframe(safe_style_dataframe(d_cartera[key], ['Variación']), use_container_width=True, hide_index=True)
 
         with tab_mar:
-            st.subheader("🏷️ Análisis de Marcas")
-            with st.expander("📊 RESUMEN GENERAL POR MARCA", expanded=True):
-                st.dataframe(tabla_mar_gen.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
-                               width='stretch', hide_index=True)
-
-            with st.expander("🔍 DETALLE: MARCA > CLIENTE > VENDEDOR", expanded=False):
-                c1, c2 = st.columns([3, 1])
-                with c1: st.info(f"Desglose detallado de marcas con sus respectivos clientes.")
-                with c2:
-                    pdf_mar_det = ExportManager.generate_single_table_pdf(tabla_mar_det, "DETALLE DE MARCAS POR CLIENTE")
-                    st.download_button("📥 Descargar Detalle (PDF)", data=pdf_mar_det, file_name="Detalle_Marcas.pdf", key="btn_pdf_mar_det")
-
-                df_mar_det_clean = clean_duplicate_labels(tabla_mar_det, ['Marca'])
-                st.dataframe(df_mar_det_clean.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
-                               width='stretch', hide_index=True)
+            m_c1, m_c2 = st.columns([0.8, 0.2])
+            with m_c1: st.subheader("Resumen por Marca")
+            with m_c2: # RESTAURADO: Botón PDF individual para Marcas
+                pdf_mar = ExportManager.generate_consolidated_report({"Resumen Marcas": t_mar_gen})
+                st.download_button("📥 PDF Marcas", data=pdf_mar, file_name="Reporte_Marcas.pdf")
+            st.dataframe(safe_style_dataframe(t_mar_gen, ['Variación']), use_container_width=True, hide_index=True)
+            with st.expander("🔍 Detalle Marca > Cliente"):
+                st.dataframe(safe_style_dataframe(clean_duplicate_labels(t_mar_det, ['Marca']), ['Variación']), use_container_width=True, hide_index=True)
 
         with tab_ven:
-            st.subheader("💼 Gestión de Vendedores")
-            st.markdown("### 📲 Generar Reportes para WhatsApp")
-            zip_data = ExportManager.generate_batch_zip_reports(tabla_ven_det)
-            st.download_button(
-                label="📥 DESCARGAR TODOS LOS PDF (ZIP)",
-                data=zip_data,
-                file_name=f"Reportes_Vendedores_{datetime.now().strftime('%Y%m%d')}.zip",
-                mime="application/zip",
-                type="primary",
-                use_container_width=True
-            )
-            st.divider()
-            with st.expander("📊 RANKING DE VENDEDORES", expanded=True):
-                st.dataframe(tabla_ven_gen.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
-                               width='stretch', hide_index=True)
-            with st.expander("🔍 DETALLE: VENDEDOR > MARCA > CLIENTE", expanded=True):
-                df_ven_det_clean = clean_duplicate_labels(tabla_ven_det, ['Vendedor', 'Marca'])
-                st.dataframe(df_ven_det_clean.style.map(color_variance, subset=['Variación']).apply(style_subtotals, axis=1),
-                               width='stretch', hide_index=True)
-
-    elif 'df_ventas' in st.session_state and st.session_state.df_ventas.empty:
-        st.warning("⚠️ No hay datos para los filtros seleccionados.")
-# forced update: 02/02/2026 08:59:11
+            v_c1, v_c2 = st.columns([0.8, 0.2])
+            with v_c1: st.subheader("Ranking Vendedores")
+            with v_c2: # RESTAURADO: Botón PDF individual para Vendedores
+                pdf_ven = ExportManager.generate_consolidated_report({"Ranking Vendedores": t_ven_gen})
+                st.download_button("📥 PDF Ranking", data=pdf_ven, file_name="Ranking_Vendedores.pdf")
+            st.dataframe(safe_style_dataframe(t_ven_gen, ['Variación']), use_container_width=True, hide_index=True)
+            st.markdown("### 📊 Matriz Operativa (Vendedor > Cadena > Marca)")
+            st.dataframe(safe_style_dataframe(clean_duplicate_labels(t_ven_det, ['Vendedor', 'Cadena', 'Marca']), ['% Var Cant', '% Var Mont']), use_container_width=True, hide_index=True)
+            st.download_button("📦 GENERAR ZIP VENDEDORES", data=ExportManager.generate_batch_zip_reports(t_ven_det), file_name="Reportes.zip", use_container_width=True)
+    else:
+        st.warning("⚠️ No se encontraron datos para la combinación de filtros seleccionada.")

@@ -1,29 +1,62 @@
 # Ubicación: C:\Users\hecto\Documents\Prg_locales\I_R_G\audit_terminal.py
+import pandas as pd
+import time
+from sqlalchemy import create_engine, text
 from core.database import get_dataframe
 
-def prueba_fuego_con_casting():
-    print("🎯 PROBANDO FILTRADO CON CONVERSIÓN DE TIPOS (CASTING)")
+# --- CONFIGURACIÓN DE EMERGENCIA ---
+# Reemplaza con tus datos reales si el import falla
+DB_URL = "postgresql://postgres:postgres@localhost:5432/postgres" # <--- AJUSTA ESTO
 
-    # El ID que vimos que existía físicamente
-    id_prueba = "2047"
+def vaciar_tablas_directo():
+    print("\n" + "!"*50)
+    print("⚠️  EJECUTANDO LIMPIEZA FORZADA (VÍA SQL DIRECTO)")
+    print("!"*50)
 
-    # Forzamos a la DB a tratar la columna text como si fuera integer
-    query = f"""
-        SELECT id_cliente, fecha, monto
-        FROM registro_ventas_general
-        WHERE CAST(id_cliente AS INTEGER) = {id_prueba}
-        LIMIT 5
-    """
+    confirmacion = input("\n¿Confirmas vaciar 'cadena' y 'cliente_cadena'? (SI): ")
+    if confirmacion.upper() == 'SI':
+        try:
+            # Creamos un engine local para esta operación de mantenimiento
+            engine_local = create_engine(DB_URL)
 
+            with engine_local.connect() as conn:
+                # Iniciamos una transacción manual
+                with conn.begin():
+                    print("🧹 Vaciando cliente_cadena...")
+                    conn.execute(text("TRUNCATE TABLE cliente_cadena RESTART IDENTITY CASCADE;"))
+                    print("🧹 Vaciando cadena...")
+                    conn.execute(text("TRUNCATE TABLE cadena RESTART IDENTITY CASCADE;"))
+
+            print("\n✅ LIMPIEZA TOTAL COMPLETADA CON ÉXITO.")
+            time.sleep(1) # Pausa para que el DB respire
+        except Exception as e:
+            print(f"❌ ERROR CRÍTICO AL VACIAR: {e}")
+            print("\nPosible causa: La URL de conexión en este script no es correcta.")
+    else:
+        print("\n❌ Operación cancelada.")
+
+def ejecutar_auditoria():
+    print("\n" + "="*80)
+    print("🔍 MÓDULO DE MANTENIMIENTO DE BASE DE DATOS")
+    print("="*80)
+
+    accion = input("¿Deseas VACIAR las tablas 'cadena' y 'cliente_cadena' ahora? (s/n): ")
+    if accion.lower() == 's':
+        vaciar_tablas_directo()
+
+    print("\n[ VERIFICACIÓN DE RESULTADOS ]")
     try:
-        df = get_dataframe(query)
-        if not df.empty:
-            print(f"✅ ¡CONEXIÓN EXITOSA! Usando CAST logramos ver al cliente {id_prueba}")
-            print(df.to_string(index=False))
-        else:
-            print(f"❌ Ni con CAST encontramos el ID {id_prueba}. Verifica si tiene decimales como '2047.0'")
-    except Exception as e:
-        print(f"⚠️ Error en la conversión: {e}")
+        for tabla in ['cadena', 'cliente_cadena']:
+            df = get_dataframe(f"SELECT * FROM {tabla} LIMIT 5;")
+            if df is not None and not df.empty:
+                print(f"❌ LA TABLA '{tabla}' AÚN TIENE DATOS.")
+            else:
+                print(f"✨ LA TABLA '{tabla}' ESTÁ TOTALMENTE VACÍA.")
+    except:
+        print("No se pudo verificar el estado de las tablas.")
+
+    print("\n" + "="*80)
+    print("✅ PROCESO FINALIZADO")
 
 if __name__ == "__main__":
-    prueba_fuego_con_casting()
+    ejecutar_auditoria()
